@@ -14,10 +14,11 @@ import os
 import stomppy
 import xml.dom.minidom
 import xml.sax.saxutils
+import socket
 
 
 # Splunk scheme for introspection.
-SCHEME = '''<scheme>
+SCHEME = """<scheme>
     <title>STOMP</title>
     <description>Listen on a STOMP endpoint for incoming messages in a queue/topic.</description>
     <use_external_validation>true</use_external_validation>
@@ -68,10 +69,17 @@ SCHEME = '''<scheme>
                 <required_on_create>false</required_on_create>
                 <required_on_edit>false</required_on_edit>
             </arg>
+            <arg name="outputs_to_monitor">
+                <title>Outputs to monitor</title>
+                <description>Splunk indexers to which we are forwarding data. We monitor their TCP ports</description>
+                <data_type>string</data_type>
+                <required_on_create>false</required_on_create>
+                <required_on_edit>false</required_on_edit>
+            </arg>
         </args>
     </endpoint>
 </scheme>
-'''
+"""
 
 
 # Splunk helper class.
@@ -81,9 +89,9 @@ class SplunkHelper(object):
 
     @classmethod
     def init(cls):
-        '''
+        """
         General Splunk script initializations.
-        '''
+        """
         # Sets up logging suitable for Splunk comsumption.
         logging.root
         logging.root.setLevel(logging.DEBUG)
@@ -99,11 +107,11 @@ class SplunkHelper(object):
 
     @classmethod
     def is_splunkd_running(cls):
-        '''
+        """
         Due to problems killing modular input scripts when stopping/restarting
         Splunk, a dirty check is provided to stop the scripts if the parent
         splunkd process disappears.
-        '''
+        """
         if not cls.IS_WINDOWS:
             for pid in (cls.PID, os.getppid()):
                 gparent_pid = os.popen('ps -p %d -oppid=' % pid).read().strip()
@@ -113,17 +121,17 @@ class SplunkHelper(object):
 
     @classmethod
     def open_stream(self):
-        '''
+        """
         See http://docs.splunk.com/Documentation/Splunk/latest/AdvancedDev/ModInputsStream
-        '''
+        """
         sys.stdout.write('<stream>')
         sys.stdout.flush()
 
     @classmethod
     def stream_data(self, data):
-        '''
+        """
         See http://docs.splunk.com/Documentation/Splunk/latest/AdvancedDev/ModInputsStream
-        '''
+        """
         sys.stdout.write('<event unbroken="1"><data>')
         sys.stdout.write(xml.sax.saxutils.escape(data))
         sys.stdout.write('</data><done/></event>\n')
@@ -131,17 +139,17 @@ class SplunkHelper(object):
 
     @classmethod
     def close_stream(self):
-        '''
+        """
         See http://docs.splunk.com/Documentation/Splunk/latest/AdvancedDev/ModInputsStream
-        '''
+        """
         sys.stdout.write('</stream>\n')
         sys.stdout.flush()
 
     @classmethod
     def print_error(cls, message):
-        '''
+        """
         Prints XML error data to be consumed by Splunk.
-        '''
+        """
         sys.stdout.write('<error><message>')
         sys.stdout.write(xml.sax.saxutils.escape(message))
         sys.stdout.write('</message></error>')
@@ -197,9 +205,9 @@ def parse_name(name):
 
 
 def get_validation_data():
-    '''
+    """
     Read XML validation data passed from Splunk.
-    '''
+    """
     val_data = {}
 
     # Read everything from stdin.
@@ -230,9 +238,9 @@ def get_validation_data():
 
 
 def get_config():
-    '''
+    """
     Read XML configuration passed from Splunk.
-    '''
+    """
     config = {}
 
     try:
@@ -278,16 +286,16 @@ def get_config():
 
 
 def do_scheme():
-    '''
+    """
     --scheme
-    '''
+    """
     sys.stdout.write(SCHEME)
 
 
 def validate_arguments():
-    '''
+    """
     --validate-arguments
-    '''
+    """
     val_data = get_validation_data()
 
     try:
@@ -312,9 +320,9 @@ def validate_arguments():
 
 
 def test():
-    '''
+    """
     --test
-    '''
+    """
     sys.stdout.write('No tests available for this schema.')
     sys.exit(1)
 
@@ -322,6 +330,24 @@ def test():
 def usage():
     sys.stdout.write('Usage: %s [--scheme|--validate-arguments]' % os.path.basename(__file__))
     sys.exit(2)
+
+
+def outputs_healthy(outputs_to_monitor):
+    """
+    Pass in an array of strings host:port.
+    Return boolean indicating if we have at least one healthy output to send data to
+    """
+    if len(outputs_to_monitor) == 0:
+        return True
+    for output in outputs_to_monitor:
+        sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        sock.settimeout(10)
+        host, port = output.split(':')
+        result = sock.connect_ex((host, int(port)))
+        sock.close()
+        if result == 0:
+            return True
+    return False
 
 
 def run():
@@ -333,6 +359,7 @@ def run():
     use_explicit_acks = config.get('use_explicit_acks', False)
     use_persistent_subscription = config.get('use_persistent_subscription', False)
     subscription_id = config.get('subscription_id', 'splunk-stomp')
+    outputs_to_monitor = config.get('outputs_to_monitor', "").split(',')
 
     # Connect & listen.
     SplunkHelper.open_stream()
@@ -359,6 +386,10 @@ def run():
                     stopping = True
                 # Is the STOMP connection still valid?
                 elif not connection.is_connected():
+                    break
+                elif not outputs_healthy(outputs_to_monitor):
+                    connection.disconnect()
+                    time.sleep(30)
                     break
                 # Wait for the next check.
                 else:
